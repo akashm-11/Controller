@@ -1,129 +1,155 @@
-name: Build DISCON.dll (ifort full automation)
+name: Build DISCON.dll (Fully Automated)
 
 on:
   push:
     paths:
       - "**/*.f90"
       - "**/*.F90"
+  workflow_dispatch: # Allows manual trigger from GitHub UI
 
 jobs:
   build:
-    # MUST be a self-hosted Windows runner (admin rights required)
-    runs-on: self-hosted
-    timeout-minutes: 240
+    runs-on: windows-latest # Uses GitHub-hosted Windows runner
+    timeout-minutes: 120
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # ---------------------------
-    # 0. quick admin check (best-effort)
-    # ---------------------------
-    - name: Ensure running as admin (best-effort)
-      shell: cmd
-      run: |
-        whoami /groups | find "S-1-5-32-544" >nul || (
-          echo WARNING: This job is not running as Administrator. Installer steps may fail.
-        )
-
-    # ---------------------------
-    # 1. Download Visual Studio 2022 bootstrapper (if missing)
-    # Source from gist - aka.ms stable link for VS 2022 community
-    # ---------------------------
-    - name: Download Visual Studio 2022 bootstrapper
-      shell: cmd
-      run: |
-        if not exist vs_community.exe (
+      # ---------------------------
+      # Step 1: Download Visual Studio 2022 Bootstrapper
+      # ---------------------------
+      - name: Download Visual Studio 2022 Community
+        shell: cmd
+        run: |
           echo Downloading Visual Studio 2022 bootstrapper...
           curl -L "https://aka.ms/vs/17/release/vs_community.exe" -o vs_community.exe
-        ) else (
-          echo vs_community.exe already present
-        )
+          if %ERRORLEVEL% NEQ 0 (
+            echo Failed to download VS bootstrapper
+            exit /b 1
+          )
+          echo Download complete
 
-    # ---------------------------
-    # 2. Silent install Visual Studio 2022 Desktop C++ workload (if missing)
-    # Uses workload id: Microsoft.VisualStudio.Workload.NativeDesktop
-    # Important: requires Admin privileges; first run will be slow.
-    # ---------------------------
-    - name: Install Visual Studio 2022 (Desktop C++ workload) if missing
-      shell: cmd
-      run: |
-        where cl >nul 2>&1 && (
-          echo cl.exe found — skipping VS install
-        ) || (
-          echo Running VS bootstrapper (silent) - this may take a long time...
-          rem --quiet: no UI, --wait: wait for completion, --norestart: don't auto reboot
-          rem add the Desktop C++ workload ID; include recommended components for a C++ build environment
-          vs_community.exe --quiet --wait --norestart --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended
-          IF %ERRORLEVEL% NEQ 0 (
-            echo Visual Studio installer failed with %ERRORLEVEL%
+      # ---------------------------
+      # Step 2: Install Visual Studio 2022 (Desktop C++ Workload)
+      # ---------------------------
+      - name: Install Visual Studio 2022 with C++ Desktop Development
+        shell: cmd
+        run: |
+          echo Installing Visual Studio 2022 - this will take 10-15 minutes...
+          vs_community.exe --quiet --wait --norestart ^
+            --add Microsoft.VisualStudio.Workload.NativeDesktop ^
+            --includeRecommended
+          if %ERRORLEVEL% NEQ 0 (
+            echo Visual Studio installation failed with error %ERRORLEVEL%
             exit /b %ERRORLEVEL%
           )
-        )
+          echo Visual Studio installed successfully
 
-    # ---------------------------
-    # 3. (Optional) Create local layout advice (comment)
-    # If you want deterministic offline installs, create a layout manually ahead of time:
-    # vs_community.exe --layout C:\vs_layout --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended --lang en-US
-    # ---------------------------
-
-    # ---------------------------
-    # 4. Download Intel oneAPI HPC Toolkit (offline) - your provided URL
-    # ---------------------------
-    - name: Download Intel oneAPI HPC Toolkit (offline EXE)
-      shell: cmd
-      run: |
-        if not exist w_HPCKit.exe (
-          echo Downloading Intel HPC Toolkit offline installer...
+      # ---------------------------
+      # Step 3: Download Intel oneAPI HPC Toolkit
+      # ---------------------------
+      - name: Download Intel oneAPI HPC Toolkit 2023
+        shell: cmd
+        run: |
+          echo Downloading Intel oneAPI HPC Toolkit (offline installer ~3GB)...
           curl -L "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/438527fc-7140-422c-a851-389f2791816b/w_HPCKit_p_2023.2.0.49441_offline.exe" -o w_HPCKit.exe
-        ) else (
-          echo Intel installer already present
-        )
+          if %ERRORLEVEL% NEQ 0 (
+            echo Failed to download Intel HPC Toolkit
+            exit /b 1
+          )
+          echo Download complete
 
-    # ---------------------------
-    # 5. Silent-install Intel oneAPI (if ifort missing)
-    # NOTE: installer accepts EULA and components; running the offline installer silently needs admin.
-    # ---------------------------
-    - name: Install Intel oneAPI HPC Toolkit (ifort) if missing
-      shell: cmd
-      run: |
-        if exist "C:\Program Files (x86)\Intel\oneAPI\compiler\latest\windows\bin\ifort.exe" (
-          echo Intel ifort already installed - skipping
-        ) else (
-          echo Installing Intel oneAPI HPC toolkit (silent) - requires admin...
-          rem The installer supports silent mode and EULA acceptance; component selection is used to reduce install size.
-          w_HPCKit.exe -s --eula accept --components intel.oneapi.win.ifort
-          IF %ERRORLEVEL% NEQ 0 (
-            echo Intel installer failed with %ERRORLEVEL%
+      # ---------------------------
+      # Step 4: Install Intel oneAPI HPC Toolkit (ifort)
+      # ---------------------------
+      - name: Install Intel Fortran Compiler (ifort)
+        shell: cmd
+        run: |
+          echo Installing Intel oneAPI HPC Toolkit - this will take 10-15 minutes...
+          w_HPCKit.exe -s --eula accept --components intel.oneapi.win.ifort-compiler
+          if %ERRORLEVEL% NEQ 0 (
+            echo Intel oneAPI installation failed with error %ERRORLEVEL%
             exit /b %ERRORLEVEL%
           )
-        )
+          echo Intel oneAPI installed successfully
 
-    # ---------------------------
-    # 6. Prepare environment and build DISCON.dll
-    # ---------------------------
-    - name: Build DISCON.dll with ifort
-      shell: cmd
-      run: |
-        rem load oneAPI environment (intel64)
-        call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
-        rem load VS environment to make sure linkers are available
-        where cl >nul 2>&1 || (
-          echo "cl.exe not found in PATH - ensure Visual Studio installed and 'cl' is available"
-        )
-        rem Build command (simple as requested)
-        ifort /dll /libs:static DISCON.F90 /link /out:DISCON.dll
-        IF %ERRORLEVEL% NEQ 0 (
-          echo BUILD FAILED with %ERRORLEVEL%
-          exit /b %ERRORLEVEL%
-        )
-        echo Build complete. DISCON.dll should exist.
+      # ---------------------------
+      # Step 5: Verify Installations
+      # ---------------------------
+      - name: Verify compiler installations
+        shell: cmd
+        run: |
+          echo Verifying Visual Studio installation...
+          call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          where cl >nul 2>&1
+          if %ERRORLEVEL% NEQ 0 (
+            echo ERROR: cl.exe not found - Visual Studio installation issue
+            exit /b 1
+          )
+          echo cl.exe found: OK
 
-    # ---------------------------
-    # 7. Upload the resulting DLL
-    # ---------------------------
-    - name: Upload DISCON.dll
-      uses: actions/upload-artifact@v4
-      with:
-        name: DISCON-dll
-        path: DISCON.dll
+          echo Verifying Intel Fortran installation...
+          call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
+          where ifort >nul 2>&1
+          if %ERRORLEVEL% NEQ 0 (
+            echo ERROR: ifort.exe not found - Intel installation issue
+            exit /b 1
+          )
+          echo ifort.exe found: OK
+
+      # ---------------------------
+      # Step 6: Build DISCON.dll
+      # ---------------------------
+      - name: Compile DISCON.F90 to DISCON.dll
+        shell: cmd
+        run: |
+          echo Setting up build environment...
+
+          rem Load Visual Studio environment
+          call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+          rem Load Intel oneAPI environment
+          call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
+
+          echo Starting compilation...
+          ifort /dll /libs:static DISCON.F90 /link /out:DISCON.dll
+
+          if %ERRORLEVEL% NEQ 0 (
+            echo BUILD FAILED with error %ERRORLEVEL%
+            exit /b %ERRORLEVEL%
+          )
+
+          echo Build completed successfully!
+
+          rem Verify DLL was created
+          if not exist DISCON.dll (
+            echo ERROR: DISCON.dll was not created
+            exit /b 1
+          )
+
+          echo DISCON.dll created successfully
+          dir DISCON.dll
+
+      # ---------------------------
+      # Step 7: Upload DISCON.dll as Artifact
+      # ---------------------------
+      - name: Upload DISCON.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: DISCON-dll-windows
+          path: DISCON.dll
+          retention-days: 90
+
+      # ---------------------------
+      # Step 8: Display Success Message
+      # ---------------------------
+      - name: Build Summary
+        shell: cmd
+        run: |
+          echo ========================================
+          echo BUILD SUCCESSFUL
+          echo ========================================
+          echo DISCON.dll has been compiled and uploaded
+          echo Download it from the Artifacts section
+          echo ========================================
